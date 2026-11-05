@@ -485,6 +485,7 @@ log.Sync() / log.Close() error
 |---|---|---|
 | [example/basic](example/basic) | 重构前 v1 全部功能对等演示（级别/格式/切割/动态级别/Named…） | `go run ./basic` |
 | [example/base2](example/base2) | v1 观感对齐专项对比：彩色控制台 / 无色日志文件 / 自动滚动，三项均程序化证实 | `go run ./base2` |
+| [example/base3](example/base3) | base2 的 JSON 行形态：控制台与文件双路 JSON、逐行合法性校验、自动滚动 | `go run ./base3` |
 | [example/kafka](example/kafka) | 字节流 Sink 接入 Kafka（拷贝入队、有界队列、批量异步、本地双写兜底） | `go run ./kafka` |
 | [example/elasticsearch](example/elasticsearch) | 结构化 Core 接入 ES（内建 JSON 编码、按天索引路由、_bulk 批量） | `go run ./elasticsearch` |
 
