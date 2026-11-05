@@ -297,7 +297,7 @@ if err := os.ReadFile(path); err != nil {
 | `logger.Fatal(...)` | 先写日志 → `Sync` → `os.Exit(1)` | 启动期不可恢复失败（defer 不执行） |
 | `logger.DPanic(...)` | `Development=true` 时 panic，生产等同 Error | 开发期断言 |
 
-`DisableStacktrace = true` 可关闭 error 及以上级别的自动堆栈；`DisableCaller = true` 可关闭调用位置记录（省去 caller 采集开销）。
+`DisableStacktrace = true` 可关闭 error 及以上级别的自动堆栈；`DisableCaller = true` 可关闭调用位置记录（省去 caller 采集开销）。caller 默认展示为**最后两级相对路径**（如 `main/main.go:12`，与旧版及 zap `ShortCallerEncoder` 一致），完整路径的取用方式见[常见问题](#常见问题)。
 
 ### 场景 12：扩展——自定义目的地与输出格式
 
@@ -484,6 +484,7 @@ log.Sync() / log.Close() error
 | 示例 | 内容 | 运行 |
 |---|---|---|
 | [example/basic](example/basic) | 重构前 v1 全部功能对等演示（级别/格式/切割/动态级别/Named…） | `go run ./basic` |
+| [example/base2](example/base2) | v1 观感对齐专项对比：彩色控制台 / 无色日志文件 / 自动滚动，三项均程序化证实 | `go run ./base2` |
 | [example/kafka](example/kafka) | 字节流 Sink 接入 Kafka（拷贝入队、有界队列、批量异步、本地双写兜底） | `go run ./kafka` |
 | [example/elasticsearch](example/elasticsearch) | 结构化 Core 接入 ES（内建 JSON 编码、按天索引路由、_bulk 批量） | `go run ./elasticsearch` |
 
@@ -507,6 +508,19 @@ go test -bench=. -benchmem -count=5 > bench_results.txt
 
 ```go
 _ = logger.Init(logger.Config{Console: false, File: false})
+```
+
+</details>
+
+<details>
+<summary><b>caller 显示的路径规则是什么？能输出完整路径吗？</b></summary>
+
+默认裁剪为**最后两级**（`main/main.go:12`），与旧版及 zap `ShortCallerEncoder` 一致，避免暴露构建机器的目录结构。完整路径始终保存在 `Entry.CallerFile`，自定义 Core / 编码器可直接取用；通过 `logger.NewLogger` 自建编码器时，传 `logger.EncoderConfig{FullCallerPath: true}` 可让内置编码器输出完整路径：
+
+```go
+core := logger.NewCore(logger.NewAtomicLevel(logger.InfoLevel),
+    logger.NewConsoleEncoder(logger.EncoderConfig{FullCallerPath: true}), sink)
+log := logger.NewLogger(core)
 ```
 
 </details>

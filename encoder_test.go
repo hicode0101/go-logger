@@ -122,3 +122,81 @@ func TestEncoderClone(t *testing.T) {
 		t.Errorf("克隆编码器应保留着色配置: %q", b.Bytes())
 	}
 }
+
+// TestCallerPathTrim 验证 caller 路径默认裁剪为最后两级（v1/zap
+// ShortCallerEncoder 行为），FullCallerPath 开关可还原完整路径。
+func TestCallerPathTrim(t *testing.T) {
+	full := "D:/AiWork/work-6/go-logger/example/basic/main.go"
+	entry := newTestEntry()
+	entry.CallerFile = full
+
+	// console：默认裁剪为 "basic/main.go:12"，不暴露构建目录
+	enc := NewConsoleEncoder(EncoderConfig{})
+	b := getBuffer()
+	defer putBuffer(b)
+	enc.Encode(b, &entry, nil)
+	got := string(b.Bytes())
+	if !strings.Contains(got, "\tbasic/main.go:12\t") {
+		t.Errorf("console caller 应裁剪为最后两级：%q", got)
+	}
+	if strings.Contains(got, "AiWork") {
+		t.Errorf("console caller 不应包含构建目录：%q", got)
+	}
+
+	// console：FullCallerPath 还原完整路径
+	b.Reset()
+	NewConsoleEncoder(EncoderConfig{FullCallerPath: true}).Encode(b, &entry, nil)
+	if !strings.Contains(string(b.Bytes()), full+":12") {
+		t.Errorf("FullCallerPath 应输出完整路径：%q", b.Bytes())
+	}
+
+	// json：默认裁剪
+	b.Reset()
+	NewJSONEncoder(EncoderConfig{}).Encode(b, &entry, nil)
+	if !strings.Contains(string(b.Bytes()), `"caller":"basic/main.go:12"`) {
+		t.Errorf("json caller 应裁剪为最后两级：%q", b.Bytes())
+	}
+
+	// json：FullCallerPath 还原完整路径
+	b.Reset()
+	NewJSONEncoder(EncoderConfig{FullCallerPath: true}).Encode(b, &entry, nil)
+	if !strings.Contains(string(b.Bytes()), `"caller":"`+full+`:12"`) {
+		t.Errorf("json FullCallerPath 应输出完整路径：%q", b.Bytes())
+	}
+
+	// 反斜杠路径容错（自定义来源路径可能是 Windows 原生分隔符）
+	entry.CallerFile = `D:\work\proj\sub\main.go`
+	b.Reset()
+	NewConsoleEncoder(EncoderConfig{}).Encode(b, &entry, nil)
+	if !strings.Contains(string(b.Bytes()), "\tsub"+`\main.go`+":12\t") {
+		t.Errorf("反斜杠路径也应正确裁剪：%q", b.Bytes())
+	}
+
+	// 无分隔符 / 仅一级分隔：原样保留（与 zap 语义一致）
+	for _, p := range []string{"main.go", "/main.go", "D:/main.go"} {
+		e := newTestEntry()
+		e.CallerFile = p
+		b.Reset()
+		NewConsoleEncoder(EncoderConfig{}).Encode(b, &e, nil)
+		if !strings.Contains(string(b.Bytes()), "\t"+p+":12\t") {
+			t.Errorf("路径 %q 不应被裁剪改变：%q", p, b.Bytes())
+		}
+	}
+}
+
+// TestShortCallerPath shortCallerPath 规则与 zap TrimmedPath 对齐。
+func TestShortCallerPath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"main.go", "main.go"},
+		{"/main.go", "/main.go"},
+		{"a/b/main.go", "b/main.go"},
+		{"/a/b/main.go", "b/main.go"},
+		{"D:/AiWork/work-6/go-logger/example/basic/main.go", "basic/main.go"},
+		{`D:\work\proj\sub\main.go`, `sub\main.go`},
+	}
+	for _, c := range cases {
+		if got := shortCallerPath(c.in); got != c.want {
+			t.Errorf("shortCallerPath(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}

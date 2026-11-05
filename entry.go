@@ -12,7 +12,7 @@ type Entry struct {
 	Time          time.Time // 事件时间
 	LoggerName    string    // Named 设置的子日志器名，空表示根日志器
 	CallerDefined bool      // 是否采集到了调用位置
-	CallerFile    string    // 调用位置文件路径（相对路径）
+	CallerFile    string    // 调用位置文件路径（编译期完整路径；内置编码器输出时默认裁剪为最后两级，见 EncoderConfig.FullCallerPath）
 	CallerLine    int       // 调用位置行号
 	Message       string    // 日志消息
 	Stack         string    // 堆栈文本，仅 Error 及以上级别（或显式配置）采集

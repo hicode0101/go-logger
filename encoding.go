@@ -121,6 +121,27 @@ func utf8ByteLen(b byte) int {
 	}
 }
 
+// shortCallerPath 返回路径的最后两级片段 "dir/file.go"（zap
+// ShortCallerEncoder 同款规则），供 caller 输出与 v1 行为一致：
+// 编译期绝对路径会暴露构建机器的目录结构，展示层默认裁剪。
+// runtime.Caller 系列在 Windows 上也返回 '/' 分隔路径（golang/go#3335），
+// 这里对 '\' 一并容错，兼容自定义来源的路径。纯下标扫描，零分配。
+func shortCallerPath(path string) string {
+	i := len(path) - 1
+	for i >= 0 && path[i] != '/' && path[i] != '\\' {
+		i--
+	}
+	if i < 0 {
+		return path // 无分隔符：本身就是文件名
+	}
+	j := i - 1
+	for j >= 0 && path[j] != '/' && path[j] != '\\' {
+		j--
+	}
+	// 仅一级分隔时 j=-1，返回原路径（与 zap 语义一致，不产生空串）
+	return path[j+1:]
+}
+
 // appendFloatValue 追加 JSON 合法的浮点字面量：NaN/±Inf 在 JSON 中
 // 无对应字面量，按 zap 语义编码为字符串 "NaN"/"+Inf"/"-Inf"。
 func appendFloatValue(buf *Buffer, v float64) {

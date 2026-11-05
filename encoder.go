@@ -41,18 +41,34 @@ func newEncoderByName(name string, cfg EncoderConfig) Encoder {
 // EncoderConfig 编码器配置。
 type EncoderConfig struct {
 	Color bool // 控制台级别着色（ANSI 转义序列），文件输出请保持 false
+	// FullCallerPath caller 输出完整文件路径。默认 false：裁剪为
+	// "最后两级目录/文件.go:行"（与 v1 及 zap ShortCallerEncoder 一致），
+	// 避免暴露构建机器的目录结构。Entry.CallerFile 始终保存完整路径，
+	// 本开关只影响内置编码器的展示，自定义 Core 拿到的数据不变。
+	FullCallerPath bool
 }
 
 // consoleEncoder 控制台/人类可读编码器，输出布局（制表符分隔，同旧版）：
 //
 //	2024-06-01 12:30:45.123	INFO	[name]	main/main.go:12	消息	{"key": "value"}	堆栈
 type consoleEncoder struct {
-	color bool
+	color      bool
+	fullCaller bool
 }
 
 // NewConsoleEncoder 创建控制台编码器。
 func NewConsoleEncoder(cfg EncoderConfig) Encoder {
-	return consoleEncoder{color: cfg.Color}
+	return consoleEncoder{color: cfg.Color, fullCaller: cfg.FullCallerPath}
+}
+
+// appendCallerFile 按配置追加 caller 文件路径：默认裁剪为最后两级
+// （v1/zap ShortCallerEncoder 行为），FullCallerPath 时输出完整路径。
+func appendCallerFile(buf *Buffer, entry *Entry, full bool) {
+	if full {
+		buf.AppendString(entry.CallerFile)
+		return
+	}
+	buf.AppendString(shortCallerPath(entry.CallerFile))
 }
 
 // separator 控制台字段分隔符。
@@ -88,10 +104,10 @@ func (e consoleEncoder) Encode(buf *Buffer, entry *Entry, fields []Field) {
 		appendSep()
 		buf.AppendString(entry.LoggerName)
 	}
-	// 调用位置（file:line 直接追加，零拼接分配）
+	// 调用位置（file:line 直接追加，零拼接分配；路径按配置裁剪）
 	if entry.CallerDefined {
 		appendSep()
-		buf.AppendString(entry.CallerFile)
+		appendCallerFile(buf, entry, e.fullCaller)
 		buf.AppendByte(':')
 		buf.AppendInt(int64(entry.CallerLine))
 	}
@@ -119,12 +135,13 @@ func (e consoleEncoder) Clone() Encoder { return e }
 // jsonEncoder JSON 行编码器，每条日志一行 JSON 对象，
 // 适合接入 Elasticsearch / 日志采集管道（Filebeat、Fluentd 等）。
 type jsonEncoder struct {
-	color bool // JSON 模式下不生效，仅为 Clone 语义完整
+	color      bool // JSON 模式下不生效，仅为 Clone 语义完整
+	fullCaller bool
 }
 
 // NewJSONEncoder 创建 JSON 行编码器。
 func NewJSONEncoder(cfg EncoderConfig) Encoder {
-	return jsonEncoder{color: cfg.Color}
+	return jsonEncoder{color: cfg.Color, fullCaller: cfg.FullCallerPath}
 }
 
 // Encode 实现 Encoder。
@@ -155,7 +172,7 @@ func (e jsonEncoder) Encode(buf *Buffer, entry *Entry, fields []Field) {
 	if entry.CallerDefined {
 		addKey("caller")
 		buf.AppendByte('"')
-		buf.AppendString(entry.CallerFile)
+		appendCallerFile(buf, entry, e.fullCaller)
 		buf.AppendByte(':')
 		buf.AppendInt(int64(entry.CallerLine))
 		buf.AppendByte('"')
