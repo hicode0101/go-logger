@@ -1,37 +1,190 @@
 package logger
 
-import (
-	"time"
-
-	"go.uber.org/zap/zapcore"
-)
-
-// timeLayoutMs 日志时间格式，精确到毫秒。
-const timeLayoutMs = "2006-01-02 15:04:05.000"
-
-// TimeEncoder 自定义时间编码器，输出形如 2024-06-01 12:30:45.123，
-// 比 zap 默认的 ISO8601 格式更紧凑易读，适合中文项目的日志习惯。
-func TimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-	enc.AppendString(t.Format(timeLayoutMs))
+// Encoder 编码器：把 Entry + 字段编码为一段可写出的字节。
+//
+// 设计约定（性能核心）：
+//   - 编码目标由调用方传入的池化 Buffer 提供，编码器自身无状态、可并发复用；
+//   - Encode 必须在末尾补上行结束符（本库统一为 "\n"），调用方直接 Write 即可；
+//   - 每个级别一条日志调用一次 Encode，禁止在 Encode 内部分配大对象。
+//
+// 自定义编码器见 docs/EXTEND.md：实现本接口并调用 RegisterEncoder 即可。
+type Encoder interface {
+	// Encode 把 entry 与 fields 编码进 buf（覆盖写，不要求调用方预先 Reset）。
+	Encode(buf *Buffer, entry *Entry, fields []Field)
+	// Clone 返回可独立修改配置（如关闭着色）的副本。
+	Clone() Encoder
 }
 
-// levelColorMap 日志级别到控制台颜色的映射。
-// 只需在此处登记即可扩展（如为 Fatal 指定颜色），未登记的级别用 BrightMagenta 兜底。
-var levelColorMap = map[zapcore.Level]ConsoleColor{
-	zapcore.DebugLevel: BrightGreen,
-	zapcore.InfoLevel:  BrightBlue,
-	zapcore.WarnLevel:  BrightYellow,
-	zapcore.ErrorLevel: BrightRed,
+// encoderRegistry 编码器注册表：内置 console/json，可注册自定义实现。
+var encoderRegistry = map[string]func(EncoderConfig) Encoder{}
+
+// RegisterEncoder 注册名为 name 的编码器工厂，重复注册覆盖。
+// 供扩展方接入自定义输出格式（如 CSV、logfmt、Protobuf），
+// 之后在 Config.Encoding / SinkConfig.Format 中引用该名称。
+func RegisterEncoder(name string, factory func(EncoderConfig) Encoder) {
+	encoderRegistry[name] = factory
 }
 
-// ColorLevelEncoder 带 ANSI 颜色的日志级别编码器，输出的级别名加粗高亮，
-// 便于在控制台快速扫视定位。仅用于控制台输出；写文件请使用
-// zapcore.CapitalLevelEncoder（纯文本大写），避免转义序列污染日志文件。
-func ColorLevelEncoder(lvl zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
-	color, ok := levelColorMap[lvl]
-	if !ok {
-		// 未映射的级别（DPanic/Panic/Fatal 等）兜底为高亮洋红
-		color = BrightMagenta
+func init() {
+	RegisterEncoder("console", func(c EncoderConfig) Encoder { return NewConsoleEncoder(c) })
+	RegisterEncoder("json", func(c EncoderConfig) Encoder { return NewJSONEncoder(c) })
+}
+
+// newEncoderByName 按名称构造编码器，未知名称回退到 console。
+func newEncoderByName(name string, cfg EncoderConfig) Encoder {
+	if f, ok := encoderRegistry[name]; ok {
+		return f(cfg)
 	}
-	enc.AppendString(color.Format(lvl.CapitalString()))
+	return NewConsoleEncoder(cfg)
+}
+
+// EncoderConfig 编码器配置。
+type EncoderConfig struct {
+	Color bool // 控制台级别着色（ANSI 转义序列），文件输出请保持 false
+}
+
+// consoleEncoder 控制台/人类可读编码器，输出布局（制表符分隔，同旧版）：
+//
+//	2024-06-01 12:30:45.123	INFO	[name]	main/main.go:12	消息	{"key": "value"}	堆栈
+type consoleEncoder struct {
+	color bool
+}
+
+// NewConsoleEncoder 创建控制台编码器。
+func NewConsoleEncoder(cfg EncoderConfig) Encoder {
+	return consoleEncoder{color: cfg.Color}
+}
+
+// separator 控制台字段分隔符。
+const separator = '\t'
+
+// Encode 实现 Encoder。
+func (e consoleEncoder) Encode(buf *Buffer, entry *Entry, fields []Field) {
+	buf.Reset()
+	first := true
+
+	// 追加制表符分隔的元素，避免重复的"非首个则加 \t"判断
+	appendSep := func() {
+		if !first {
+			buf.AppendByte(separator)
+		}
+		first = false
+	}
+
+	// 时间
+	if !entry.Time.IsZero() {
+		appendSep()
+		buf.AppendTime(entry.Time, timeLayoutMs)
+	}
+	// 级别（可着色），恒输出
+	appendSep()
+	if e.color {
+		levelColor(entry.Level).AppendTo(buf, entry.Level.CapitalString())
+	} else {
+		buf.AppendString(entry.Level.CapitalString())
+	}
+	// 子日志器名
+	if entry.LoggerName != "" {
+		appendSep()
+		buf.AppendString(entry.LoggerName)
+	}
+	// 调用位置（file:line 直接追加，零拼接分配）
+	if entry.CallerDefined {
+		appendSep()
+		buf.AppendString(entry.CallerFile)
+		buf.AppendByte(':')
+		buf.AppendInt(int64(entry.CallerLine))
+	}
+	// 消息
+	if entry.Message != "" {
+		appendSep()
+		buf.AppendString(entry.Message)
+	}
+	// 结构化字段（JSON 形式内联）
+	if len(fields) > 0 {
+		appendSep()
+		appendFieldsJSON(buf, fields)
+	}
+	// 堆栈独立成行，前缀缩进便于区分
+	if entry.Stack != "" {
+		buf.AppendByte('\n')
+		buf.AppendString(entry.Stack)
+	}
+	buf.AppendByte('\n')
+}
+
+// Clone 实现 Encoder。
+func (e consoleEncoder) Clone() Encoder { return e }
+
+// jsonEncoder JSON 行编码器，每条日志一行 JSON 对象，
+// 适合接入 Elasticsearch / 日志采集管道（Filebeat、Fluentd 等）。
+type jsonEncoder struct {
+	color bool // JSON 模式下不生效，仅为 Clone 语义完整
+}
+
+// NewJSONEncoder 创建 JSON 行编码器。
+func NewJSONEncoder(cfg EncoderConfig) Encoder {
+	return jsonEncoder{color: cfg.Color}
+}
+
+// Encode 实现 Encoder。
+func (e jsonEncoder) Encode(buf *Buffer, entry *Entry, fields []Field) {
+	buf.Reset()
+	buf.AppendByte('{')
+	first := true
+
+	addKey := func(key string) {
+		if !first {
+			buf.AppendByte(',')
+		}
+		first = false
+		appendJSONString(buf, key)
+		buf.AppendByte(':')
+	}
+
+	addKey("level")
+	appendJSONString(buf, entry.Level.String())
+	addKey("time")
+	buf.AppendByte('"')
+	buf.AppendTime(entry.Time, timeLayoutMs)
+	buf.AppendByte('"')
+	if entry.LoggerName != "" {
+		addKey("logger")
+		appendJSONString(buf, entry.LoggerName)
+	}
+	if entry.CallerDefined {
+		addKey("caller")
+		buf.AppendByte('"')
+		buf.AppendString(entry.CallerFile)
+		buf.AppendByte(':')
+		buf.AppendInt(int64(entry.CallerLine))
+		buf.AppendByte('"')
+	}
+	addKey("msg")
+	appendJSONString(buf, entry.Message)
+	for i := range fields {
+		buf.AppendByte(',')
+		appendFieldJSON(buf, fields[i])
+	}
+	if entry.Stack != "" {
+		addKey("stacktrace")
+		appendJSONString(buf, entry.Stack)
+	}
+	buf.AppendByte('}')
+	buf.AppendByte('\n')
+}
+
+// Clone 实现 Encoder。
+func (e jsonEncoder) Clone() Encoder { return e }
+
+// appendFieldsJSON 编码字段块 "{k:v,k2:v2}"（控制台编码器内联用）。
+func appendFieldsJSON(buf *Buffer, fields []Field) {
+	buf.AppendByte('{')
+	for i := range fields {
+		if i > 0 {
+			buf.AppendByte(',')
+		}
+		appendFieldJSON(buf, fields[i])
+	}
+	buf.AppendByte('}')
 }

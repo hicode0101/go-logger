@@ -1,2 +1,11 @@
-# 日志库运行时自动创建的日志目录
+# Go
+*.exe
+*.out
+*.test
+
+# IDE
+.idea/
+.vscode/
+
+# 本地测试日志输出
 logs/
